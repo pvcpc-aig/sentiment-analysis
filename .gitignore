@@ -1,0 +1,8 @@
+# Personal files and datasets
+data/
+
+# IDE or environment related files
+venv
+.ipynb_checkpoints
+.idea
+*.iml
