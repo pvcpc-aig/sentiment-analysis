@@ -24,14 +24,6 @@ threading_enable = True
 # us, but they tend to be good at that.
 threading_max_threads = mp.cpu_count()
 
-# For the multithreaded implementation of the JSON document parser,
-# we define the maximum number of line entries that will be processed
-# in blocks by multiple threads.
-#
-# On an 8-logical processor system this will give each thread about
-# 8,000 lines to chew through.
-threading_max_line_buffer_size = 2 ** 16
-
 # Value in the range [0, 1] specifying the portion,
 # as a percentage, of each dataset to convert to
 # CSV.
@@ -39,35 +31,91 @@ max_dataset_portion = 0.25
 
 # 2^17 lines per file, which should yield approximately
 # 64 files for the 9 GB "json".
-max_csv_lines = 131072
+#
+#
+max_csv_lines = 2 ** 16
 
 """ multithreading pseudocode
 ReadTS
 ----------------------------
 ready: Boolean
-read_cv: ConditionVariable
-proc_cv: ConditionVariable
+
+@property
+def ready(self):
+    with self._ready_lock:
+        return self._ready
+
+@property
+def ready(self, val):
+    with self._ready_lock:
+        self._ready = val
+
+@property
+def done(self):
+    with self._done_lock:
+        return self._done
+
+@property
+def done(self, val):
+    with self._done_lock:
+        return self._done
+
+read_cv: ConditionVariable(Semaphore)
+proc_cv: ConditionVariable(Lock)
 meet: Barrier
+prepare: Barrier
 
 
 Read Thread (manager thread)         | Parsing Thread (subordinate thread) |
 -------------------------------------|-------------------------------------|
 launch subordinate threads           |                                     |
-while needs_content:                 |while !readts.ready                  |
-  fill line buffer                   |  readts.read_cv.wait()              |
+while needs_content:                 |while True:                          |
+  fill line buffer                   |  with readts.read_cv:               |
+  with readts.read_cv:               |    while !readts.ready:             |
+     readts.ready = True             |      readts.read_cv.wait()          |
+     readts.read_cv.notify_all()     |  if readts.done:                    |
+     readts.ready = False            |    break                            |
+  readts.meet.wait()                 |  copy global line buffer            |
+  copy and write parsed data         |  parsed local line buffer           |
+with readts.read_cv:                 |  write local parsed line buffer     |
+  readts.done = True                 |  readts.meet.wait()                 |
   readts.read_cv.notify_all()        |                                     |
-  while !all_threads_copied_data:    |                                     |
-    readts.proc_cv.wait()            |                                     |
-                                     |                                     |
-                                     |                                     |
-                                     |                                     |
-                                     |                                     |
-                                     |                                     |
-                                     |                                     |
                                      |                                     |
                                      |                                     |
                                      |                                     |
 """
+
+class ReadThreadState:
+
+	def __init__(self, thread_count):
+		self._read_lk = th.Lock()
+		self._done_lk = th.Lock()
+		self._ready = False
+		self._done = False
+		self.read_cv = th.Condition(th.Semaphore(thread_count))
+		self.rejoin = th.Barrier(thread_count)
+		self.prepare = th.Barrier(thread_count)
+
+	@property
+	def ready(self):
+		with self._read_lk:
+			return self._read
+		
+	@property
+	def ready(self, val):
+		with self._read_lk:
+			self._read = val
+
+	@property
+	def done(self):
+		with self._done_lk:
+			return self._done
+		
+	@property
+	def done(self, val):
+		with self._done_lk:
+			self._done = val
+
 
 class ParsingThread(th.Thread):
 
@@ -96,15 +144,31 @@ class ParsingThread(th.Thread):
 		
 		The inteval of lines this thread will process is [index, index + blksz)
 		"""
+		# local data definition accessed only in this thread
 		self._local = th.local()
 		self._local.index = index
 		self._local.blksz = blksz
 		self._local.raw_block = [] * blksz
 		self._local.parsed_block = [] * blksz
-		self.lnbuf = lnbuf
+
+		# global definitions accessed outside of this thread
+		self._global_lnbuf = lnbuf
+		self._global_readts = readts
+		self._global_parsed_block = [] * blksz
 
 	def run(self):
-		pass
+		readts = self._global_readts
+		while True:
+			with readts.read_cv:
+				while not readts.ready:
+					readts.read_cv.wait()
+			if readts.done:
+				break
+			# copy global line buffer
+			# parse local line buffer
+			# write local parsed buffer
+			readts.rejoin.wait()
+			readts.prepare.wait()
 
 
 def raw_to_csv_mp(amz_ds): 
@@ -127,14 +191,17 @@ def raw_to_csv_mp(amz_ds):
 	csv_f = raw.joinpath("csv")
 	line_buffer = [] * threading_max_line_buffer_size
 
-	
-
 	# setup the threads, locks, and other concurrent
 	# architecture
+	readts = ReadThreadState(threads + 1)     # threads + 1 to include this reading/main thread
 	thread_block_size = lnbfsz / threads
 	thread_group = []
 	for i in range(threading_max_threads):
 		thread_group = ParsingThread(line_buffer, i * thread_block_size, thread_block_size)
+	
+	# Read in JSON and disptach word 
+	for t in thread_group:
+		t.start()
 
 
 
