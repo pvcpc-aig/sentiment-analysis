@@ -1,5 +1,6 @@
 # Personal files and datasets
 data/
+dict/
 
 # IDE or environment related files
 venv
