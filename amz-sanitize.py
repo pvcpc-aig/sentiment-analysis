@@ -24,16 +24,17 @@ threading_enable = True
 # us, but they tend to be good at that.
 threading_max_threads = mp.cpu_count()
 
+# The maximum number of lines to store in the line buffer
+# for processing by multiple threads. 
+#
+# For an 8 processor system, this is around 8000 lines/thread.
+threading_max_line_buffer_size = 2 ** 16
+
 # Value in the range [0, 1] specifying the portion,
 # as a percentage, of each dataset to convert to
 # CSV.
 max_dataset_portion = 0.25
 
-# 2^17 lines per file, which should yield approximately
-# 64 files for the 9 GB "json".
-#
-#
-max_csv_lines = 2 ** 16
 
 """ multithreading pseudocode
 ReadTS
@@ -180,7 +181,7 @@ def raw_to_csv_mp(amz_ds):
 	lnbfsz = threading_max_line_buffer_size
 	threads = threading_max_threads
 
-	is_pow2 = 0 == lnbfsz & (lnbfsz - 1)
+	is_pow2 = 0 == (lnbfsz & (lnbfsz - 1))
 	is_gtcpus = lnbfsz > threads
 	if not (is_pow2 and is_gtcpus):
 		raise RuntimeError("Line buffer size must be a power of 2; must be greater than processor count {threads}")
@@ -189,7 +190,7 @@ def raw_to_csv_mp(amz_ds):
 	raw = amz_ds.joinpath("raw")
 	json_f = raw.joinpath("json")
 	csv_f = raw.joinpath("csv")
-	line_buffer = [] * threading_max_line_buffer_size
+	line_buffer = [] * lnbfsz
 
 	# setup the threads, locks, and other concurrent
 	# architecture
@@ -197,11 +198,49 @@ def raw_to_csv_mp(amz_ds):
 	thread_block_size = lnbfsz / threads
 	thread_group = []
 	for i in range(threading_max_threads):
-		thread_group = ParsingThread(line_buffer, i * thread_block_size, thread_block_size)
+		thread_group = ParsingThread(readts, line_buffer, i * thread_block_size, thread_block_size)
 	
-	# Read in JSON and disptach word 
+	# Check the dataset size
+	ds_lines = 0
+	with json_f.open(mode="r") as handle:
+		for i, l in enumerate(handle):
+			ds_lines = i 
+	ds_lines += 1 # adjust for 0-based index
+	max_lines = int(ds_lines * max_dataset_portion)
+
+	# We first launch all of our processing threads and
+	# make them wait until we load in the first chunk of
+	# data
 	for t in thread_group:
 		t.start()
+
+	# Start reading in the raw information, and dispatch
+	# work to other threads.
+	def _dispatch(done: bool, csv_h):
+		with readts.read_cv:
+			readts.ready = True
+			readts.read_cv.notify_all()
+		readts.rejoin.wait()
+		readts.ready = False
+		readts.done = done
+		readts.prepare.wait()
+
+	with csv_f.open(mode="w") as csv_h:
+		with json_f.open(mode="r") as json_h:
+			i_mod = 0
+			for i, ln in enumerate(json_h):
+				i_mod = i % lnbfsz
+				if i > max_lines:
+					break
+				line_buffer[i_mod] = ln
+				if lnbfsz == i_mod + 1: # we filled out buffer, dispatch work
+					_dispatch(False)
+			if i_mod > 0:
+				while i_mod < max_lines:
+					line_buffer[i_mod] = None
+					i_mod += 1
+				_dispatch(True)
+			
 
 
 
