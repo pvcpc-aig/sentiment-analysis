@@ -24,7 +24,7 @@ line_block_size = 2 ** 18
 # Value in the range (0, 1] specifying the portion,
 # as a percentage, of each dataset to convert to
 # CSV.
-max_dataset_portion = 1
+max_dataset_portion = 0.10
 
 # The number of bytes to use as the read buffer for
 # the input files.
@@ -94,7 +94,7 @@ def raw_to_csv(ds_amz):
 					formatted_values.append(None)
 
 				for j, raw in enumerate(parsed_values):	
-					formatted_values[j] = '"' + str(raw).replace('"', '\\"') + '"'
+					formatted_values[j] = '"' + str(raw).replace('"', '\'') + '"'
 
 				parsed_str = ','.join(formatted_values)
 				csv_h.write(f"{parsed_str}\n")
