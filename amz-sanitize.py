@@ -5,259 +5,122 @@ some fixed number of lines per CSV file.
 """
 import os
 import sys
-import threading as th
-import multiprocessing as mp
+import json
+import time
 from pathlib import Path
 
 
-# Determines whether multithreading should be employed
-# to speed up JSON document processing.
+# The datasets will be processed in `line_block_size`
+# chunks, i.e. every `line_block_size` lines of a
+# corpus file.
 #
-# This option may hurt performance on single threaded systems.
-threading_enable = True
-
-# For multithreaded parsing of the JSON documents,
-# we have to optimally distribute the workload across
-# available logical processors.
+# Since we're not using multithreading, this determines
+# how often a notification is printed to the user
+# letting them know of the progress.
 #
-# Obviously we rely on the OS to schedule operations for
-# us, but they tend to be good at that.
-threading_max_threads = mp.cpu_count()
+# The default value is 2^18 = ~256,000
+line_block_size = 2 ** 18
 
-# The maximum number of lines to store in the line buffer
-# for processing by multiple threads. 
-#
-# For an 8 processor system, this is around 8000 lines/thread.
-threading_max_line_buffer_size = 2 ** 16
-
-# Value in the range [0, 1] specifying the portion,
+# Value in the range (0, 1] specifying the portion,
 # as a percentage, of each dataset to convert to
 # CSV.
-max_dataset_portion = 0.25
+max_dataset_portion = 1
+
+# The number of bytes to use as the read buffer for
+# the input files.
+#
+# We choose 2^21 = 2MB as the buffer to minimize
+# kernel context switches, and besides, most 64-bit
+# operating systems should be able to take advantage
+# of 2MB memory pages (windows may not lol)
+max_read_buffer = 2 ** 21
+
+# The number of bytes to use as the write buffer for
+# output files.
+#
+# We choose 2^21 = 2MB, see reasoning for max_read_buffer
+# above.
+max_write_buffer = 2 ** 21
 
 
-""" multithreading pseudocode
-ReadTS
-----------------------------
-ready: Boolean
+def raw_to_csv(ds_amz):
+	from math import ceil
 
-@property
-def ready(self):
-    with self._ready_lock:
-        return self._ready
-
-@property
-def ready(self, val):
-    with self._ready_lock:
-        self._ready = val
-
-@property
-def done(self):
-    with self._done_lock:
-        return self._done
-
-@property
-def done(self, val):
-    with self._done_lock:
-        return self._done
-
-read_cv: ConditionVariable(Semaphore)
-proc_cv: ConditionVariable(Lock)
-meet: Barrier
-prepare: Barrier
-
-
-Read Thread (manager thread)         | Parsing Thread (subordinate thread) |
--------------------------------------|-------------------------------------|
-launch subordinate threads           |                                     |
-while needs_content:                 |while True:                          |
-  fill line buffer                   |  with readts.read_cv:               |
-  with readts.read_cv:               |    while !readts.ready:             |
-     readts.ready = True             |      readts.read_cv.wait()          |
-     readts.read_cv.notify_all()     |  if readts.done:                    |
-     readts.ready = False            |    break                            |
-  readts.meet.wait()                 |  copy global line buffer            |
-  copy and write parsed data         |  parsed local line buffer           |
-with readts.read_cv:                 |  write local parsed line buffer     |
-  readts.done = True                 |  readts.meet.wait()                 |
-  readts.read_cv.notify_all()        |                                     |
-                                     |                                     |
-                                     |                                     |
-                                     |                                     |
-"""
-
-class ReadThreadState:
-
-	def __init__(self, thread_count):
-		self._read_lk = th.Lock()
-		self._done_lk = th.Lock()
-		self._ready = False
-		self._done = False
-		self.read_cv = th.Condition(th.Semaphore(thread_count))
-		self.rejoin = th.Barrier(thread_count)
-		self.prepare = th.Barrier(thread_count)
-
-	@property
-	def ready(self):
-		with self._read_lk:
-			return self._read
-		
-	@property
-	def ready(self, val):
-		with self._read_lk:
-			self._read = val
-
-	@property
-	def done(self):
-		with self._done_lk:
-			return self._done
-		
-	@property
-	def done(self, val):
-		with self._done_lk:
-			self._done = val
-
-
-class ParsingThread(th.Thread):
-
-	def __init__(self, readts, lnbuf, index, blksz):
-		"""
-		:param readts
-			An object containing the reading thread state. The reading
-			thread will manage all subordinate ParsingThreads.
-
-				readts.ready : Boolean - Whether the global line buffer is
-										 ready to be read from and parsed.
-				
-				readts.
-
-		:param lnbuf
-			The line buffer created by the raw_to_csv_mp() function
-			where the reading thread will fill the data.
-		
-		:param index
-			The index in the lnbuf from which this thread will
-			being parsing.
-		
-		:param blksz
-			The number of elements in total this thread shall process
-			in the line buffer.
-		
-		The inteval of lines this thread will process is [index, index + blksz)
-		"""
-		# local data definition accessed only in this thread
-		self._local = th.local()
-		self._local.index = index
-		self._local.blksz = blksz
-		self._local.raw_block = [] * blksz
-		self._local.parsed_block = [] * blksz
-
-		# global definitions accessed outside of this thread
-		self._global_lnbuf = lnbuf
-		self._global_readts = readts
-		self._global_parsed_block = [] * blksz
-
-	def run(self):
-		readts = self._global_readts
-		while True:
-			with readts.read_cv:
-				while not readts.ready:
-					readts.read_cv.wait()
-			if readts.done:
-				break
-			# copy global line buffer
-			# parse local line buffer
-			# write local parsed buffer
-			readts.rejoin.wait()
-			readts.prepare.wait()
-
-
-def raw_to_csv_mp(amz_ds): 
-	"""
-	The multithreaded implementation of raw_to_csv()
-	"""
-	# ensure that the threading settings are
-	# valid enough to perform efficiently.
-	lnbfsz = threading_max_line_buffer_size
-	threads = threading_max_threads
-
-	is_pow2 = 0 == (lnbfsz & (lnbfsz - 1))
-	is_gtcpus = lnbfsz > threads
-	if not (is_pow2 and is_gtcpus):
-		raise RuntimeError("Line buffer size must be a power of 2; must be greater than processor count {threads}")
-
-	# setup the initial data
-	raw = amz_ds.joinpath("raw")
+	# Setup information
+	raw = ds_amz.joinpath("raw")
 	json_f = raw.joinpath("json")
 	csv_f = raw.joinpath("csv")
-	line_buffer = [] * lnbfsz
 
-	# setup the threads, locks, and other concurrent
-	# architecture
-	readts = ReadThreadState(threads + 1)     # threads + 1 to include this reading/main thread
-	thread_block_size = lnbfsz / threads
-	thread_group = []
-	for i in range(threading_max_threads):
-		thread_group = ParsingThread(readts, line_buffer, i * thread_block_size, thread_block_size)
-	
-	# Check the dataset size
-	ds_lines = 0
-	with json_f.open(mode="r") as handle:
-		for i, l in enumerate(handle):
-			ds_lines = i 
-	ds_lines += 1 # adjust for 0-based index
-	max_lines = int(ds_lines * max_dataset_portion)
+	tm_block_start = tm_block_end = None
+	tm_whole_start = tm_whole_end = None
 
-	# We first launch all of our processing threads and
-	# make them wait until we load in the first chunk of
-	# data
-	for t in thread_group:
-		t.start()
+	# Gather dataset size information
+	print(f"Gathering {ds_amz} size information...")
+	ds_lines = 1
+	with json_f.open(mode="r", buffering=max_read_buffer) as json_h:
+		for i, _ in enumerate(json_h):
+			ds_lines += 1
+	ds_max_lines = int(ds_lines * max_dataset_portion)
+	ds_max_blocks = (int(ceil(ds_max_lines / line_block_size)))
 
-	# Start reading in the raw information, and dispatch
-	# work to other threads.
-	def _dispatch(done: bool, csv_h):
-		with readts.read_cv:
-			readts.ready = True
-			readts.read_cv.notify_all()
-		readts.rejoin.wait()
-		readts.ready = False
-		readts.done = done
-		readts.prepare.wait()
+	# Load and convert JSON to CSV	
+	ds_cur_block = 0 
+	def _inc_feedback():
+		nonlocal ds_max_blocks, ds_cur_block
+		nonlocal tm_block_start, tm_block_end
 
-	with csv_f.open(mode="w") as csv_h:
-		with json_f.open(mode="r") as json_h:
-			i_mod = 0
-			for i, ln in enumerate(json_h):
-				i_mod = i % lnbfsz
-				if i > max_lines:
+		tm_block_end = time.monotonic_ns()
+
+		ds_cur_block += 1
+		percentage = 100 * ds_cur_block / ds_max_blocks
+		elapsed = 1e-9 * (tm_block_end - tm_block_start)
+		print(f"[%5.1f%%] Processed block {ds_cur_block}/{ds_max_blocks} in %.2fs" % (percentage, elapsed))
+
+		tm_block_start = time.monotonic_ns()
+
+	print(f"Processing {ds_amz} as %.1f%% dataset..." % (100 * max_dataset_portion))
+	tm_whole_start = time.monotonic_ns()
+	formatted_values = []
+	with csv_f.open(mode="w", buffering=max_write_buffer) as csv_h:
+		with json_f.open(mode="r", buffering=max_read_buffer) as json_h:
+			i = 0
+			tm_block_start = time.monotonic_ns() # a one-time startup thing for _inc_feedback()
+			for i, raw_str in enumerate(json_h):
+				if i != 0 and i % line_block_size == 0:
+					_inc_feedback()
+
+				parsed_values = json.loads(raw_str).values()
+				while len(formatted_values) < len(parsed_values):
+					formatted_values.append(None)
+
+				for j, raw in enumerate(parsed_values):	
+					formatted_values[j] = '"' + str(raw).replace('"', '\\"') + '"'
+
+				parsed_str = ','.join(formatted_values)
+				csv_h.write(f"{parsed_str}\n")
+
+				if i == ds_max_lines:
 					break
-				line_buffer[i_mod] = ln
-				if lnbfsz == i_mod + 1: # we filled out buffer, dispatch work
-					_dispatch(False)
-			if i_mod > 0:
-				while i_mod < max_lines:
-					line_buffer[i_mod] = None
-					i_mod += 1
-				_dispatch(True)
-			
 
+			if i % line_block_size != 0: 
+				_inc_feedback()
 
+	tm_whole_end = time.monotonic_ns()			
+	elapsed = 1e-9 * (tm_whole_end - tm_whole_start)
 
-def raw_to_csv(amz_ds):
-	if threading_enable:
-		raw_to_csv_mp(amz_ds)
-		return
+	print(f"Converted dataset {ds_amz} in %.2fs" % (elapsed))
 
 
 if __name__ == "__main__":
+	# verify global settings 
 	if max_dataset_portion <= 0:
 		print("max_dataset_portion must be > 0")
 		sys.exit(0)
 
+	# begin data processing
 	data = Path("data")
 	for dataset in data.iterdir():
 		is_amazon = dataset.name.startswith("amz")
 		if is_amazon:
-			print(f"Converting dataset {str(dataset)}")
+			print(f"Converting dataset {dataset}")
 			raw_to_csv(dataset)
