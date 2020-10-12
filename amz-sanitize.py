@@ -53,6 +53,26 @@ max_read_buffer = 2 ** 21
 # above.
 max_write_buffer = 2 ** 21
 
+# Whether to write the column names at the top of the exported
+# CSV files.
+#
+# Column names are analogous to extract targets below.
+write_table_header = False
+
+# Defines the specific keys to extract from the JSON data.
+extract_targets = [ "reviewText", "overall" ]
+
+
+def _format_csv_cell(obj):
+	return '"' + str(obj).replace('\\"', '\'') + '"'
+
+
+def _join_csv_row(*objs):
+	return ','.join([_format_csv_cell(x) for x in objs])
+
+
+_extract_targets_header = _join_csv_row(*extract_targets)
+
 
 def raw_to_csv(ds_amz):
 	from math import ceil
@@ -72,11 +92,12 @@ def raw_to_csv(ds_amz):
 			ds_lines += 1
 	ds_max_lines = int(ds_lines * max_dataset_portion)
 	ds_train_lines = int(ds_max_lines * split_train_to_test_ratio)
+	ds_test_lines = int(ds_max_lines * (1 - split_train_to_test_ratio))
 	ds_max_blocks = (int(ceil(ds_max_lines / line_block_size)))
 
 	# Define common helper functions and state
 	ds_cur_block = 0 
-	formatted_values = []
+	target_values = [ None ] * len(extract_targets)
 	lnum = 0
 
 	def _print_feedback_if_ready(final):
@@ -98,17 +119,14 @@ def raw_to_csv(ds_amz):
 		tm_block_start = time.monotonic_ns()
 
 	def _parse_line_write_to_csv(raw_str, csv_h):
-		nonlocal formatted_values 
+		nonlocal target_values 
 		nonlocal lnum
 
-		parsed_values = json.loads(raw_str).values()
-		while len(formatted_values) < len(parsed_values):
-			formatted_values.append(None)
+		parsed_obj = json.loads(raw_str)
+		for i, field in enumerate(extract_targets):
+			target_values[i] = parsed_obj[field]
 
-		for j, raw in enumerate(parsed_values):	
-			formatted_values[j] = '"' + str(raw).replace('"', '\'') + '"'
-
-		parsed_str = ','.join(formatted_values)
+		parsed_str = _join_csv_row(*target_values)
 		csv_h.write(f"{parsed_str}\n")
 
 		_print_feedback_if_ready(False)
@@ -126,6 +144,9 @@ def raw_to_csv(ds_amz):
 			csv_f_test = raw.joinpath("csv-test")
 			csv_h = csv_f_train.open(mode="w", buffering=max_write_buffer)
 
+			if write_table_header:
+				csv_h.write(f"{_extract_targets_header}\n")
+
 			print("Processing training set...")
 			for i in range(ds_train_lines):
 				_parse_line_write_to_csv(json_h.readline(), csv_h)
@@ -133,17 +154,22 @@ def raw_to_csv(ds_amz):
 			csv_h.close()
 			csv_h = csv_f_test.open(mode="w", buffering=max_write_buffer)
 
+			if write_table_header:
+				csv_h.write(f"{_extract_targets_header}\n")
+
 			print("Processing testing set...")
-			for ln in json_h:
-				_parse_line_write_to_csv(ln, csv_h)
+			for i in range(ds_test_lines):
+				_parse_line_write_to_csv(json_h.readline(), csv_h)
 			
 			csv_h.close()
 		else:
 			print("Dataset will NOT be split into training/testing partitions!")
 			csv_f = raw.joinpath("csv")
 			with csv_f.open(mode="w", buffer=max_write_buffer) as csv_h:
-				for ln in json_f:
-					_parse_line_write_to_csv(ln, csv_h)
+				if write_table_header:
+					csv_h.write(f"{_extract_targets_header}\n")
+				for i in range(ds_max_lines):
+					_parse_line_write_to_csv(json_h.readline(), csv_h)
 
 		_print_feedback_if_ready(True)
 
@@ -162,6 +188,10 @@ if __name__ == "__main__":
 	if split_train_test and (split_train_to_test_ratio <= 0 or 1 <= split_train_to_test_ratio):
 		print("split_train_to_test_ratio must be in the range (0, 1)")
 		sys.exit(2)
+
+	if extract_targets is None or len(extract_targets) == 0:
+		print("extract_targets must be defined with at least one field (column name)")
+		sys.exit(3)
 
 	# begin data processing
 	data = Path("data")
