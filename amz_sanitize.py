@@ -64,7 +64,7 @@ extract_targets = [ "reviewText", "overall" ]
 
 
 def _format_csv_cell(obj):
-	return '"' + str(obj).replace('\\"', '\'') + '"'
+	return '"' + str(obj).replace('\"', '\'') + '"'
 
 
 def _join_csv_row(*objs):
