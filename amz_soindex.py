@@ -18,7 +18,10 @@ import io
 import os
 import sys
 import stanza
+from nltk.corpus import wordnet as wn
 from pathlib import Path
+
+from udax.strutil import surjective_punct_remove
 
 
 def parse_row(row_str):
@@ -53,7 +56,7 @@ def parse_row(row_str):
 	return row_list
 
 
-post = stanza.Pipeline(lang="en", processors="tokenize,mwt,pos")
+post = stanza.Pipeline(lang="en", processors="tokenize,pos")
 
 # open class words
 post.adjective = "ADJ"
@@ -79,17 +82,74 @@ post.symbol = "SYM"
 post.other = "X"
 
 
-def pos_tag(word_list):
+def pos_tag(content):
+	"""
+	:return
+		A list of tuples containing the word and the corresponding
+		part of speech tag, i.e.
+
+			[ (word1, pos1), (word2, pos2), ... ]
+	"""
 	posl = []
-	for sentence in post(word_list).sentences:
+	for sentence in post(content).sentences:
 		for word in sentence.words:
-			posl.append(word.upos)
+			posl.append((word.text, word.upos))
 	return posl
 
 
 def extract_phrases(content):
+	"""
+	Returns all pairs of words within the content string, with
+	punctuation omitted, that follow the rules of the given
+	table:
 
+		First Word     Second Word    Third Word (not extracted)
+		--------------------------------------------------------
+		ADJ            NOUN           *
+		ADV            ADJ            !NOUN
+		ADJ            ADJ            !NOUN
+		NOUN           ADJ            !NOUN
+		ADV            VERB           *
 	
+	as specified in Turney, 2002.
+	"""
+	phrasel = []
+	posl = pos_tag(surjective_punct_remove(content))
+
+	i = 0
+	while i < len(posl) - 1:
+		first = posl[i]
+		second = posl[i + 1]
+		third_pos = None if len(posl) == i + 2 else posl[i + 2][1]
+
+		if  (first[1] == post.adjective and second[1] == post.noun)                                 or \
+			(first[1] == post.adjective and second[1] == post.adjective and third_pos != post.noun) or \
+			(first[1] == post.adverb    and second[1] == post.adjective and third_pos != post.noun) or \
+			(first[1] == post.adverb    and second[1] == post.verb)                                 or \
+			(first[1] == post.noun      and second[1] == post.adjective and third_pos != post.noun):
+			phrasel.append((first[0], second[0]))
+
+		# do we add 3 or 2? Maybe both?
+		i += 2
+	
+	return phrasel
+
+
+def pmi(phrase, compared_to):
+	score = 0
+
+	cmp_ssl = wn.synsets(compared_to)
+	if cmp_ssl is None or len(cmp_ssl) == 0:
+		return 0
+	cmp_ss = cmp_ssl[0]
+
+	for word in phrase:
+		word_ssl = wn.synsets(word)
+		if word_ssl is None or len(word_ssl) == 0:
+			continue
+		word_ss = word_ssl[0]
+
+		sim = 
 
 
 if __name__ == "__main__":
