@@ -14,7 +14,7 @@ from udax.strutil import wordify_wordlist
 skip_first_csv_line = True
 
 # The number of features per vector in a sample.
-feature_vector_size = 10
+feature_vector_size = 128
 
 # The number of lines to process before emitting a status report
 # to the user when processing large files.
@@ -100,9 +100,8 @@ def so_calc_binary(synset_seen, word_list):
 
 	if pos_score > neg_score:
 		return 1
-	if neg_score > pos_score:
+	else:
 		return -1
-	return 0
 
 
 def gen_samples(dataset, raw_f, out_f):
@@ -187,7 +186,7 @@ def svm_eval(amz_ds):
 	# Create and train a model if a save does not already exist.
 	if not model_file.exists():
 		print("No saved model exists; creating...")
-		model = LinearSVC()
+		model = LinearSVC(verbose=True)
 
 		print("Loading training information...")
 		x_train = []
