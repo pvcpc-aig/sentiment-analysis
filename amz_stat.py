@@ -58,12 +58,13 @@ def gen_analytics(amz_ds):
 			tot_rating += item_rating
 			
 			if item_id not in item_stat:
-				item_stat[item_id] = 1
+				item_stat[item_id] = [ 0, [ 0, 0, 0, 0, 0, ] ]
 				tot_items += 1
 			else:
-				item_stat[item_id] += 1
+				item_stat[item_id][0] += 1
 
 			if 1 <= n_item_rating and n_item_rating <= 5:
+				item_stat[item_id][1][n_item_rating - 1] += 1
 				rating_stat[n_item_rating - 1] += 1
 			
 			reporter.ping()
@@ -80,18 +81,34 @@ def gen_analytics(amz_ds):
 	with open(stat_f, mode="w", buffering=write_buffer_size) as stat_h:
 		stat_h.write(f"Total reviews: {tot_reviews}\n")
 		stat_h.write(f"Total items: {tot_items}\n")
-		stat_h.write(f"Average reviews/item: {item_avg}\n")
+		stat_h.write(f"Average reviews/item: %.3f\n" % (item_avg))
+
 		stat_h.write("\n")
-		stat_h.write(f"Total 5/5 ratings: {rating_stat[4]}, {rating_stat[4] * 100 / tot_reviews} %\n")
-		stat_h.write(f"Total 4/5 ratings: {rating_stat[3]}, {rating_stat[3] * 100 / tot_reviews} %\n")
-		stat_h.write(f"Total 3/5 ratings: {rating_stat[2]}, {rating_stat[3] * 100 / tot_reviews} %\n")
-		stat_h.write(f"Total 2/5 ratings: {rating_stat[1]}, {rating_stat[3] * 100 / tot_reviews} %\n")
-		stat_h.write(f"Total 1/5 ratings: {rating_stat[0]}, {rating_stat[3] * 100 / tot_reviews} %\n")
-		stat_h.write(f"Average Rating: {rating_avg}\n")
+
+		stat_h.write(f"Total 5/5 ratings: %d (%.3f %%)\n" % (rating_stat[4], 100 * rating_stat[4] / tot_reviews))
+		stat_h.write(f"Total 4/5 ratings: %d (%.3f %%)\n" % (rating_stat[3], 100 * rating_stat[3] / tot_reviews))
+		stat_h.write(f"Total 3/5 ratings: %d (%.3f %%)\n" % (rating_stat[2], 100 * rating_stat[2] / tot_reviews))
+		stat_h.write(f"Total 2/5 ratings: %d (%.3f %%)\n" % (rating_stat[1], 100 * rating_stat[1] / tot_reviews))
+		stat_h.write(f"Total 1/5 ratings: %d (%.3f %%)\n" % (rating_stat[0], 100 * rating_stat[0] / tot_reviews))
+		stat_h.write(f"Average Rating: %.3f\n" % (rating_avg))
+
 		stat_h.write("\n")
-		stat_h.write("%12s %8s %8s\n" % ("Item ID", "Freq", "% Freq"))
-		for item, count in sorted(item_stat.items(), key=lambda x: x[1], reverse=True):
-			stat_h.write("%12s %8d %8.3f %%\n" % (item, count, 100 * count / tot_items))
+
+		stat_h.write("%12s %10s %10s %8s %8s %8s %8s %8s\n" % ("Item ID", "Freq", "Freq %", "5/5 %", "4/5 %", "3/5 %", "2/5 %", "1/5 %"))
+		for item, data in sorted(item_stat.items(), key=lambda x: x[1][0], reverse=True):
+			count = data[0]
+			r1, r2, r3, r4, r5 = data[1]
+			tot_local_rating = r1 + r2 + r3 + r4 + r5
+
+			freq = 100 * count / tot_items
+			percent_5 = 100 * r5 / tot_local_rating
+			percent_4 = 100 * r4 / tot_local_rating
+			percent_3 = 100 * r3 / tot_local_rating
+			percent_2 = 100 * r2 / tot_local_rating
+			percent_1 = 100 * r1 / tot_local_rating
+
+			#                 |    |        |        |        |        |        |        
+			stat_h.write("%12s %10d %8.3f %% %6.1f %% %6.1f %% %6.1f %% %6.1f %% %6.1f %%\n" % (item, count, freq, percent_5, percent_4, percent_3, percent_2, percent_1))
 	print("Ok.")
 			
 
