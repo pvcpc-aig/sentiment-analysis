@@ -1,8 +1,12 @@
 # Personal files and datasets
 data/
+dict/
 
 # IDE or environment related files
+__pycache__
 venv
+.ignore.*
 .ipynb_checkpoints
 .idea
 *.iml
+*.ipynb
