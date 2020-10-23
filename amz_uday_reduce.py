@@ -45,20 +45,27 @@ sid = SentimentIntensityAnalyzer()
 # storage requirements and processing time later.
 useless_words = set(stopwords.words("english"))
 
-# The minimum number of words required for a review
-# to be considered in the reduction process.
-min_words_per_review = 8
+# The desired size of the training and testing data
+# reduction combined in review samples.
+dataset_desired_size = 35000
 
-# The maximum number of reviews to consider for any
-# given `overall` rating.
-max_per_rating = 2048
+# The ratio of the training samples to testing samples
+# to extract.
+train_to_test_ratio = 0.8
 
-# The number of tests to write for each rating.
-tests_per_rating = 256
+# The maximum number of reviews to extract from the
+# whole dataset into a training set.
+train_review_count = int(dataset_desired_size * train_to_test_ratio)
 
-# Number of reviews to accept before printing
-# feedback to the user.
-report_block_size = 1024
+# The maximum number of reviews to extract from
+# the whole dataset into a testing set.
+test_review_count = int(dataset_desired_size * (1 - train_to_test_ratio)) 
+
+# The minimum length, in characters, of the review.
+min_len = 1250
+
+# The maximum length, in characters, of the review.
+max_len = 1500
 
 
 def reduce_dataset(amz_ds):
@@ -68,35 +75,32 @@ def reduce_dataset(amz_ds):
 	csv_f = raw.joinpath("csv-train")
 	csv_test_f = raw.joinpath("csv-test")
 
-	max_reviews_acceptable = (max_per_rating + tests_per_rating) * 5
-	rating_table = [ 0, 0, 0, 0, 0 ]
-	testing_rating_table = [ 0, 0, 0, 0, 0 ]
-	reviews_tot = 0
 	est_ratings_correct = 0
+	reviews_tot = 0
+	train_tot = 0
+	test_tot = 0
 
-	reporter = dx.BlockProcessReporter(report_block_size, max_reviews_acceptable)
 	stopwatch = dx.Stopwatch()
 
 	print("Processing...")
 	stopwatch.start()
-	reporter.start()
 	with dx.f_open_large_write(csv_test_f) as csv_test_h:
 		with dx.f_open_large_write(csv_f) as csv_h:
 			with dx.f_open_large_read(json_f) as json_h:
 				for ln in json_h:
 					obj = json.loads(ln)
+					text = obj["reviewText"]
+					if len(text) < 1250 or len(text) > 1500:
+						continue
+
 					rating = int(float(obj["overall"]))
-					
-					if rating_table[rating - 1] == max_per_rating and \
-					   testing_rating_table[rating - 1] == tests_per_rating:
+					if rating == 3:
 						continue
 
-					norm = dx.s_norm(obj["reviewText"])
+					norm = dx.s_norm(text)
 					words = norm.split()
-					if len(words) < min_words_per_review:
-						continue
-
 					rnorm = ' '.join(filter(lambda x: x not in useless_words, words))
+
 					score = sid.polarity_scores(rnorm)
 					est_sentiment = score["compound"]
 					est_rating = int((est_sentiment + 1) * 5 / 2) + 1 # convert from (-1, 1) to [1, 5]
@@ -108,21 +112,19 @@ def reduce_dataset(amz_ds):
 					if est_rating_correct:
 						est_ratings_correct += 1
 
-					if rating_table[rating - 1] < max_per_rating:
+					if train_tot < train_review_count:
 						dx.csv_writeln(rnorm, rating, est_rating, est_rating_correct, stream=csv_h)
-						rating_table[rating - 1] += 1
+						train_tot += 1
 					else:
 						dx.csv_writeln(rnorm, rating, est_rating, est_rating_correct, stream=csv_test_h)
-						testing_rating_table[rating - 1] += 1
+						test_tot += 1
 					
 					reviews_tot += 1
-					reporter.ping()
 
-					if reviews_tot == max_reviews_acceptable:
+					if train_tot == train_review_count and test_tot == test_review_count:
 						break
 	
 	stopwatch.stop()
-	reporter.finish()
 
 	print(f"Done in {repr(stopwatch)}.")
 	print("Vader achieved %.2f%% accuracy on the reduced dataset." % (100 * est_ratings_correct / reviews_tot))

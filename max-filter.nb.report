@@ -1,0 +1,3 @@
+unigram accuracy: 55.703
+all bigram accuracy: 62.891
+turney bigram accuracy: 60.000
